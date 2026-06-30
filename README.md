@@ -33,12 +33,14 @@ Base de datos (MySQL 8) — 1 réplica
 **Clúster:** `tienda_perritos_eks` — Kubernetes 1.36 — EKS Auto Mode — región `us-east-1`  
 **Nodos:** EC2 provisionados automáticamente por EKS Auto Mode (pools `general-purpose` + `system`)  
 **VPC:** VPC por defecto — 5 subredes públicas en us-east-1a/b/c/d/f  
-**Roles IAM:** `LabEksClusterRole` (plano de control) · `LabEksNodeRole` (nodos)  
+**Roles IAM:** `LabEksClusterRole-iJfHRNrQaC8W` (plano de control) · `LabEksNodeRole-T8vUmbVQunIa` (nodos)  
 **Registro de imágenes:** Amazon ECR — cuenta `047157437257` — región `us-east-1`
 
 ### Justificación de la arquitectura
 
-Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, Deployments, Services, Secrets) con mayor control sobre el orquestador. **EKS Auto Mode** simplifica el aprovisionamiento de nodos sin necesidad de crear grupos de nodos manualmente, compatible con las restricciones de roles IAM del entorno AWS Academy (Learner Lab). El NLB internet-facing es provisionado automáticamente por el controlador de balanceo **integrado en EKS Auto Mode** (`eks.amazonaws.com/nlb`), sin requerir la instalación por separado del AWS Load Balancer Controller. Las subredes de la VPC fueron taggeadas con `kubernetes.io/role/elb=1` para que el controlador las detecte correctamente.
+Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, Deployments, Services, Secrets) con mayor control sobre el orquestador. **EKS Auto Mode** simplifica el aprovisionamiento de nodos sin necesidad de crear grupos de nodos manualmente, lo que es compatible con las restricciones de roles IAM del entorno AWS Academy (Learner Lab).
+
+El frontend se expone mediante un **Network Load Balancer (NLB)**, confirmado en el manifest (`loadBalancerClass: eks.amazonaws.com/nlb`) y provisionado automáticamente por el **controlador de balanceo integrado de EKS Auto Mode** (no se instaló el AWS Load Balancer Controller por separado). Esto simplifica el aprovisionamiento de balanceadores sin necesidad de gestionar manualmente el ALB Controller, manteniendo la compatibilidad con las restricciones de roles IAM del entorno AWS Academy (Learner Lab). Las subredes de la VPC fueron etiquetadas con `kubernetes.io/role/elb=1` para que el controlador las detecte correctamente.
 
 ---
 
@@ -92,7 +94,7 @@ kubectl get secret mysql-secret -n tienda
 
 ### Nota sobre el valor por defecto en backend/server.js
 
-`server.js` define `DB_PASSWORD = "admin123"` como valor de fallback para ejecución local sin variables de entorno. En el clúster EKS, esta variable es **siempre sobreescrita** por el Kubernetes Secret vía `secretKeyRef`, por lo que el valor hardcodeado nunca se usa en producción. No hay credenciales reales expuestas en el repositorio.
+El código incluye un valor de fallback (`admin123`) en `server.js` usado únicamente para pruebas locales sin Kubernetes. En el clúster, esta variable es **sobreescrita siempre** por el valor real almacenado en el `Secret` `mysql-secret`, inyectado vía `secretKeyRef`. El valor de fallback nunca se utiliza en el entorno desplegado. No hay credenciales reales expuestas en el repositorio.
 
 ---
 
@@ -291,7 +293,7 @@ AWS Console → CloudWatch → Grupos de registros → `/aws/eks/tienda_perritos
 
 ### Nota sobre errores de OpenTelemetry en logs
 
-El addon `amazon-cloudwatch-observability` inyecta contenedores init de OTel (`opentelemetry-auto-instrumentation-nodejs`, etc.) en los pods. Al arrancar, intentan reportar trazas a AWS X-Ray y reciben `AccessDeniedException: User is not authorized to perform xray:PutTraceSegments`. Esto ocurre porque el Pod Identity del agente no tiene el permiso de X-Ray en el entorno Learner Lab. **No afecta el funcionamiento de la aplicación** — nginx, Express y MySQL operan con normalidad. Solo impacta la recolección de trazas distribuidas.
+El addon `amazon-cloudwatch-observability` inyecta automáticamente contenedores init de auto-instrumentación de OpenTelemetry (`opentelemetry-auto-instrumentation-nodejs`, entre otros) en los pods del backend. Al iniciar, estos intentan reportar trazas a **AWS X-Ray** y reciben `AccessDeniedException`, ya que el rol asociado no tiene el permiso `xray:PutTraceSegments` (falta configurar Pod Identity para el agente de CloudWatch). **Esto no afecta el funcionamiento de la aplicación**: el servidor Express y nginx operan con normalidad; el error queda acotado a la exportación de trazas de observabilidad, una capacidad adicional no requerida por el encargo.
 
 ---
 
