@@ -19,10 +19,10 @@ Internet
    │
    ▼
 Network Load Balancer (NLB · internet-facing)
-   │
+   │  gestionado por EKS Auto Mode (loadBalancerClass: eks.amazonaws.com/nlb)
    ▼
 Frontend (nginx) — 2 réplicas mínimas — namespace: tienda
-   │  proxy /api/ → tienda-backend:3001
+   │  proxy /api/ → tienda-backend:3001 (DNS interno del clúster)
    ▼
 Backend (Node.js + Express) — 2–10 réplicas (HPA)
    │
@@ -31,14 +31,14 @@ Base de datos (MySQL 8) — 1 réplica
 ```
 
 **Clúster:** `tienda_perritos_eks` — Kubernetes 1.36 — EKS Auto Mode — región `us-east-1`  
-**Nodos:** EC2 provisionados automáticamente por EKS Auto Mode (`general-purpose` + `system`)  
+**Nodos:** EC2 provisionados automáticamente por EKS Auto Mode (pools `general-purpose` + `system`)  
 **VPC:** VPC por defecto — 5 subredes públicas en us-east-1a/b/c/d/f  
 **Roles IAM:** `LabEksClusterRole` (plano de control) · `LabEksNodeRole` (nodos)  
 **Registro de imágenes:** Amazon ECR — cuenta `047157437257` — región `us-east-1`
 
 ### Justificación de la arquitectura
 
-Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, Deployments, Services, Secrets) con mayor control sobre el orquestador. **EKS Auto Mode** simplifica el aprovisionamiento de nodos sin necesidad de crear grupos de nodos manualmente, lo que es compatible con las restricciones de roles IAM del entorno AWS Academy (Learner Lab). El NLB internet-facing fue provisionado automáticamente por el controlador de balanceo integrado en Auto Mode, sin requerir instalación adicional del AWS Load Balancer Controller.
+Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, Deployments, Services, Secrets) con mayor control sobre el orquestador. **EKS Auto Mode** simplifica el aprovisionamiento de nodos sin necesidad de crear grupos de nodos manualmente, compatible con las restricciones de roles IAM del entorno AWS Academy (Learner Lab). El NLB internet-facing es provisionado automáticamente por el controlador de balanceo **integrado en EKS Auto Mode** (`eks.amazonaws.com/nlb`), sin requerir la instalación por separado del AWS Load Balancer Controller. Las subredes de la VPC fueron taggeadas con `kubernetes.io/role/elb=1` para que el controlador las detecte correctamente.
 
 ---
 
@@ -52,7 +52,7 @@ Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, 
 | Frontend | nginx (imagen personalizada) |
 | Backend | Node.js 18 + Express |
 | Base de datos | MySQL 8 |
-| Autoscaling | Horizontal Pod Autoscaler (HPA) + Metrics Server |
+| Autoscaling | Horizontal Pod Autoscaler (HPA) + Metrics Server v0.8.1 |
 | Monitoreo | Amazon CloudWatch + OTel Container Insights |
 
 ---
@@ -61,7 +61,7 @@ Se eligió **EKS** sobre ECS porque permite gestión nativa de Kubernetes (HPA, 
 
 - Cuenta AWS Academy con Learner Lab activo
 - AWS CLI v2 instalado y configurado
-- kubectl instalado (v1.36+)
+- kubectl v1.36+ instalado
 - Docker Desktop (para build local)
 - Git
 
@@ -84,11 +84,15 @@ Las credenciales AWS **nunca se almacenan en el repositorio**. Se actualizan en 
 
 ### Kubernetes Secret
 
-La contraseña de MySQL se almacena en un `Secret` de Kubernetes (`mysql-secret`) codificada en base64. El backend la consume mediante `secretKeyRef`, sin valores en texto plano en los manifests ni en el código fuente.
+La contraseña de MySQL se almacena en un `Secret` de Kubernetes (`mysql-secret`) codificada en base64. El backend la consume mediante `secretKeyRef`, sin valores en texto plano en los manifests.
 
 ```bash
 kubectl get secret mysql-secret -n tienda
 ```
+
+### Nota sobre el valor por defecto en backend/server.js
+
+`server.js` define `DB_PASSWORD = "admin123"` como valor de fallback para ejecución local sin variables de entorno. En el clúster EKS, esta variable es **siempre sobreescrita** por el Kubernetes Secret vía `secretKeyRef`, por lo que el valor hardcodeado nunca se usa en producción. No hay credenciales reales expuestas en el repositorio.
 
 ---
 
@@ -199,7 +203,7 @@ Respuesta esperada:
 
 ## Autoscaling (HPA)
 
-El **Horizontal Pod Autoscaler** escala automáticamente los pods según el uso de CPU. El **Metrics Server** fue instalado como addon nativo del clúster (v0.8.1).
+El **Horizontal Pod Autoscaler** escala automáticamente los pods según el uso de CPU. El **Metrics Server** fue instalado como addon nativo del clúster (v0.8.1-eksbuild.11), sin instalación manual adicional.
 
 | Deployment | CPU umbral | Réplicas mín. | Réplicas máx. |
 |---|---|---|---|
@@ -227,6 +231,8 @@ kubectl run load-generator \
   -- /bin/sh -c "while true; do wget -q -O- http://tienda-backend:3001/api/productos; done"
 ```
 
+Durante la prueba de carga el HPA escaló el backend de **2 → 10 réplicas** al superar el umbral de 70% CPU (se registró hasta 344% de uso). Al eliminar el generador, el HPA reduce réplicas gradualmente.
+
 Eliminar generador:
 ```bash
 kubectl delete pod load-generator -n tienda
@@ -236,14 +242,20 @@ kubectl delete pod load-generator -n tienda
 
 ## Recuperación post-deploy
 
-Para demostrar que el clúster se recupera automáticamente tras un redeploy:
+El rolling update reemplaza pods uno a uno sin downtime. Para demostrarlo:
 
 ```bash
 kubectl rollout restart deployment/tienda-backend -n tienda
 kubectl rollout status deployment/tienda-backend -n tienda
 ```
 
-El rolling update reemplaza los pods uno a uno sin downtime.
+Salida esperada:
+```
+deployment.apps/tienda-backend restarted
+Waiting for deployment "tienda-backend" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "tienda-backend" rollout to finish: 1 old replicas are pending termination...
+deployment "tienda-backend" successfully rolled out
+```
 
 ---
 
@@ -265,11 +277,56 @@ kubectl top nodes
 
 ### CloudWatch
 
-Los logs del plano de control se envían automáticamente a CloudWatch:
+Los logs del plano de control se envían automáticamente a CloudWatch. Grupos disponibles en `/aws/eks/tienda_perritos_eks/cluster`:
 
-- AWS Console → CloudWatch → Grupos de registros → `/aws/eks/tienda_perritos_eks/cluster`
+| Flujo | Contenido |
+|---|---|
+| `kube-apiserver` | Todas las llamadas a la API del clúster |
+| `kube-apiserver-audit` | Auditoría de acceso y operaciones |
+| `authenticator` | Eventos de autenticación IAM |
+| `kube-controller-manager` | Estado de los controladores |
+| `kube-scheduler` | Decisiones de programación de pods |
 
-Flujos disponibles: `kube-apiserver`, `kube-apiserver-audit`, `authenticator`, `kube-controller-manager`, `kube-scheduler`.
+AWS Console → CloudWatch → Grupos de registros → `/aws/eks/tienda_perritos_eks/cluster`
+
+### Nota sobre errores de OpenTelemetry en logs
+
+El addon `amazon-cloudwatch-observability` inyecta contenedores init de OTel (`opentelemetry-auto-instrumentation-nodejs`, etc.) en los pods. Al arrancar, intentan reportar trazas a AWS X-Ray y reciben `AccessDeniedException: User is not authorized to perform xray:PutTraceSegments`. Esto ocurre porque el Pod Identity del agente no tiene el permiso de X-Ray en el entorno Learner Lab. **No afecta el funcionamiento de la aplicación** — nginx, Express y MySQL operan con normalidad. Solo impacta la recolección de trazas distribuidas.
+
+---
+
+## Análisis de logs, métricas y tiempos del pipeline (IE6)
+
+### Tiempos del pipeline (run exitoso — 2026-06-29)
+
+| Step | Duración | Observación |
+|---|---|---|
+| Build & push DB | 14s | El más lento — imagen MySQL base más pesada |
+| Build & push Backend | 8s | Node.js con dependencias npm |
+| Build & push Frontend | 4s | nginx estático, imagen más liviana |
+| Configurar kubeconfig | 4s | Llamada a API de EKS para obtener token |
+| Aplicar manifests base | 5s | Apply + rollout status de mysql |
+| Actualizar Backend en EKS | 4s | set image + rollout status |
+| Actualizar Frontend en EKS | 3s | set image + rollout status |
+| **Total pipeline** | **~50s** | Desde checkout hasta estado final |
+
+### Conclusiones
+
+- El paso más lento es el **build & push de imágenes** (26s de 50s totales = 52% del tiempo). Esto es esperado en un entorno sin caché de capas Docker entre runs.
+- El **deploy al clúster** es rápido (12s) gracias al rolling update con 2 réplicas — siempre hay un pod disponible mientras el nuevo arranca.
+- Los **runs fallidos iniciales** fueron causados por configuración, no por código: credenciales no configuradas, versión de kubectl incompatible y subredes sin tag. Una vez resueltos, el pipeline es estable.
+- Durante la prueba de carga, `kubectl top pods` mostró el backend consumiendo hasta **5m CPU por pod** en reposo y escalando hasta 10 réplicas bajo carga, confirmando que el HPA responde correctamente a métricas reales.
+
+---
+
+## Problemas encontrados y solución
+
+| Problema | Causa | Solución aplicada |
+|---|---|---|
+| Pipeline falla al hacer login ECR (`not authorized`) | Credenciales AWS no configuradas en GitHub Secrets | Se configuraron los 6 secrets requeridos antes del primer run |
+| `kubectl rollout status` falla con error de API | kubectl v1.29 incompatible con clúster K8s 1.36 (diferencia de 7 versiones) | PR `fix/kubectl-version-workflow`: actualizar kubectl a v1.36.0 en el workflow |
+| `frontend-service` queda en `EXTERNAL-IP: <pending>` indefinidamente | Subredes de la VPC sin el tag `kubernetes.io/role/elb` requerido por el controlador del NLB | Se taggearon las 5 subredes con `kubernetes.io/role/elb=1` vía AWS CLI |
+| Pipeline falla con `voc-cancel-cred` (AccessDenied en ECR) | Credenciales del Learner Lab expiraron (~4h de vida útil) | Actualizar los 3 secrets de AWS en GitHub al inicio de cada sesión del Lab |
 
 ---
 
