@@ -4,12 +4,12 @@ metadata:
   name: tienda-frontend
   namespace: tienda
   annotations:
-    # Indicamos que el LB lo maneja el AWS Load Balancer Controller
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    # Forzamos que sea público y (no interno)
+    # Forzamos que sea público (no interno)
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 spec:
   type: LoadBalancer
+  # EKS Auto Mode: el NLB lo provisiona el controlador nativo del clúster
+  loadBalancerClass: eks.amazonaws.com/nlb
   selector:
     app: tienda-frontend
   ports:
