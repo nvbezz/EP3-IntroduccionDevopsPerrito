@@ -37,7 +37,7 @@ Base de datos (MySQL 8) — 1 réplica
 | **Nodos** | EC2 provisionados automáticamente por Auto Mode (pools `general-purpose` + `system`) |
 | **VPC** | VPC por defecto — subredes públicas en us-east-1a/b/c/d/f etiquetadas con `kubernetes.io/role/elb=1` |
 | **Roles IAM** | `LabEksClusterRole` (plano de control) · `LabEksNodeRole` (nodos) |
-| **Registro** | Amazon ECR — cuenta `047157437257` — región `us-east-1` |
+| **Registro** | Amazon ECR — cuenta `<AWS_ACCOUNT_ID>` — región `us-east-1` |
 
 ### Justificación de la arquitectura
 
